@@ -15,6 +15,6 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libglu1-mesa
       - run: pip install -r lib/palace/python/requirements.txt
       - run: bun install
-      - run: bun test tests/palace/explicit-mesh.test.tsx tests/palace/multilayer-mesh.test.tsx tests/palace/multilayer-surface.test.ts tests/palace/trace-caps.test.tsx tests/palace/surface-impedance.test.tsx
+      - run: bun test tests/palace/explicit-mesh.test.tsx tests/palace/multilayer-mesh.test.tsx tests/palace/multilayer-surface.test.ts tests/palace/trace-caps.test.tsx tests/palace/surface-impedance.test.tsx tests/palace/boolean-cleanup.test.ts tests/palace/local-region.test.ts
         env:
           PALACE_MESH_PYTHON: python

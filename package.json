@@ -46,7 +46,7 @@
   "dependencies": {
     "@resvg/resvg-js": "2.6.2",
     "@tscircuit/solver-utils": "0.0.21",
-    "circuit-json": "0.0.522",
+    "circuit-json": "0.0.537",
     "graphics-debug": "0.0.76",
     "transformation-matrix": "2.16.1",
     "zod": "3.25.76"
