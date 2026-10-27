@@ -628,3 +628,15 @@ and publishes it with provenance. Repository metadata targets
 `NPM_TOKEN` secret; later releases can use npm trusted publishing configured for
 the repository and `publish-npm.yml`. Bump `package.json` before subsequent
 releases. You can also run `npm publish --access public` after authenticating.
+
+Four-layer Palace runs can use `copperModel: "surface_impedance_copper"`
+with an explicit `stackup` at frequencies where every foil and plated via wall
+is at least three skin depths thick. The mesher retains each dielectric and all
+conductors, replacing conductive volumes with finite-conductivity interfaces.
+`sampleLayer` selects the physical foil; both exposed foil-face currents are
+summed. The volumetric low-frequency path is unchanged.
+
+A native 400 MHz smoke run on the four-layer reference board (blind signal vias,
+ground through-vias, inner2 return plane) completed with P1, 2 mm mesh and 0.1 mm
+sampling: 30,905 tetrahedra and 4,792 valid two-face samples. This is a functional
+check; mesh refinement is still required to establish numerical convergence.

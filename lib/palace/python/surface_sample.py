@@ -76,8 +76,13 @@ def probe_face(boundary, coordinates, z, receipt=None):
 def sample_surface(path, coordinates, model, scale_amps_per_mm, receipts=None):
     boundary = read_boundary(path)
     top_receipt, bottom_receipt = {}, {}
-    top, top_valid = probe_face(boundary, coordinates, 0, top_receipt)
-    bottom, bottom_valid = probe_face(boundary, coordinates, -model["copperThickness"], bottom_receipt)
+    z_min, z_max = -model["copperThickness"], 0
+    if model.get("multilayer"):
+        foil = next(layer for layer in model["multilayer"]["stackup"]["copperLayers"]
+                    if layer["name"] == model["multilayer"]["sampleLayer"])
+        z_min, z_max = foil["zMin"], foil["zMax"]
+    top, top_valid = probe_face(boundary, coordinates, z_max, top_receipt)
+    bottom, bottom_valid = probe_face(boundary, coordinates, z_min, bottom_receipt)
     if not (top_valid | bottom_valid).all():
         raise ValueError(f"{np.count_nonzero(~(top_valid | bottom_valid))} declared conductor samples have no exposed foil face")
     if receipts is not None:

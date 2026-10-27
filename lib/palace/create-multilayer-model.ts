@@ -34,10 +34,12 @@ export function createMultilayerPalaceModel(
   const boards = options.circuitJson.filter((e) => e.type === "pcb_board")
   if (boards.length !== 1) throw new Error("Exactly one PCB board is required")
   const board = boards[0]
-  if (options.copperModel === "surface_impedance_copper")
-    throw new Error(
-      "surface_impedance_copper currently supports the two-layer mesher only",
-    )
+  const copperModel = options.copperModel ?? "volumetric_copper"
+  if (
+    copperModel !== "volumetric_copper" &&
+    copperModel !== "surface_impedance_copper"
+  )
+    throw new Error("Unknown copperModel")
   if (!options.stackup)
     throw new Error(
       "Multilayer boards require an explicit fabrication stackup (--stackup-file); layer spacing is not inferred",
@@ -74,6 +76,7 @@ export function createMultilayerPalaceModel(
     1000 /
     Math.sqrt(Math.PI * frequencyHz * 4e-7 * Math.PI * copperConductivity)
   if (
+    copperModel === "volumetric_copper" &&
     stackup.copperLayers.some((layer) => layer.zMax - layer.zMin > skinDepthMm)
   )
     throw new Error(
@@ -439,6 +442,17 @@ export function createMultilayerPalaceModel(
     layered.audit.warnings.push(
       `Explicit stack sums to ${stackup.physicalThicknessMm} mm, nominal ${stackup.nominalBoardThicknessMm} mm; explicit dimensions are used without scaling.`,
     )
+  const minimumCopperThickness = Math.min(
+    ...stackup.copperLayers.map((layer) => layer.zMax - layer.zMin),
+    ...layered.barrels.map((barrel) => barrel.platingThickness),
+  )
+  if (
+    copperModel === "surface_impedance_copper" &&
+    minimumCopperThickness < 3 * skinDepthMm
+  )
+    throw new Error(
+      "The half-space surface-impedance model requires every foil and via-wall thickness >= 3 skin depths; use volumetric copper at lower frequencies",
+    )
   geometry.physicalModelSignature = JSON.stringify({
     ...layered,
     traceEndCaps: "round_32",
@@ -466,7 +480,17 @@ export function createMultilayerPalaceModel(
     meshSize: positiveFinite(options.meshSize ?? 1, "meshSize"),
     airPadding: positiveFinite(options.airPadding ?? 10, "airPadding"),
     order,
-    copperModel: "volumetric_copper",
+    copperModel,
+    ...(copperModel === "surface_impedance_copper"
+      ? {
+          surfaceImpedance: {
+            boundaryModel: "half_space" as const,
+            skinDepthMm,
+            minimumThicknessToSkinDepth: minimumCopperThickness / skinDepthMm,
+            currentSampling: "sum_foil_face_surface_currents" as const,
+          },
+        }
+      : {}),
   }
 }
 

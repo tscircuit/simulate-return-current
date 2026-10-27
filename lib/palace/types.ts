@@ -30,7 +30,7 @@ export interface PalaceOptions
   meshSize?: number
   airPadding?: number
   order?: 1 | 2
-  /** Explicit two-layer finite-conductivity boundary approximation. Default
+  /** Finite-conductivity boundary approximation for sufficiently thick foils and via walls. Default
    * volumetric_copper resolves conduction inside meshed copper. */
   copperModel?: "volumetric_copper" | "surface_impedance_copper"
 }

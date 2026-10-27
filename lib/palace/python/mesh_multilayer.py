@@ -238,6 +238,7 @@ def validate_aperture(options):
 
 def generate_multilayer_mesh(model, destination):
     layered = model["multilayer"]
+    surface_impedance = model["copperModel"] == "surface_impedance_copper"
     board, planar_copper = layer_copper(model)
     validate_reference_connectivity(model, planar_copper)
     gmsh.initialize()
@@ -259,10 +260,12 @@ def generate_multilayer_mesh(model, destination):
                 raise ValueError("Plated barrel does not fit its pad/board")
             copper_by_net.setdefault(barrel["netId"], []).extend(prism({"shape": outer.difference(hole), "zMin": barrel["zMin"], "zMax": barrel["zMax"]}))
         copper = []
+        copper_groups = []
         for net_id, volumes in copper_by_net.items():
             if len(volumes) > 1:
                 volumes, _ = gmsh.model.occ.fuse(volumes[:1], volumes[1:])
             copper.extend(volumes)
+            copper_groups.append((net_id, len(volumes)))
         if not copper:
             raise ValueError("Empty copper model")
         # Dielectrics occupy the resin around patterned inner foil too. The
@@ -319,7 +322,8 @@ def generate_multilayer_mesh(model, destination):
         gmsh.model.occ.synchronize()
         copper_offset = 1 + len(dielectric_volumes)
         copper_tags = {tag for desc in mapping[copper_offset:copper_offset + len(copper)] for dim, tag in desc if dim == 3}
-        gmsh.model.addPhysicalGroup(3, sorted(copper_tags), 3, "copper")
+        if not surface_impedance:
+            gmsh.model.addPhysicalGroup(3, sorted(copper_tags), 3, "copper")
         dielectric_tags = set()
         offset = 1
         for attribute, count in dielectric_counts:
@@ -345,6 +349,30 @@ def generate_multilayer_mesh(model, destination):
         # Avoid tagging exposed drilled/board surfaces as absorbing boundaries.
         # The combined boundary is the air enclosure, since voids are filled by air.
         copper_surfaces = [tag for dim, tag in gmsh.model.getBoundary([(3, tag) for tag in copper_tags], combined=False, oriented=False) if dim == 2]
+        copper_volume = sum(gmsh.model.occ.getMass(3, tag) for tag in copper_tags)
+        if surface_impedance:
+            exterior = {tag for dim, tag in gmsh.model.getBoundary([(3, tag) for tag in copper_tags], combined=True, oriented=False) if dim == 2}
+            active = {tag for dim, tag in gmsh.model.getBoundary([(3, tag) for tag in air_tags | dielectric_tags], combined=False, oriented=False) if dim == 2}
+            exposed = exterior & active
+            ground_volumes = set()
+            offset = copper_offset
+            for net_id, count in copper_groups:
+                if net_id == layered["referenceNetId"]:
+                    ground_volumes.update(tag for desc in mapping[offset:offset + count] for dim, tag in desc if dim == 3)
+                offset += count
+            ground_faces = {tag for dim, tag in gmsh.model.getBoundary([(3, tag) for tag in ground_volumes], combined=True, oriented=False) if dim == 2} & exposed
+            signal_faces = exposed - ground_faces
+            if not ground_faces or not signal_faces:
+                raise ValueError("Surface impedance requires exposed reference and signal conductor interfaces")
+            if exposed.intersection(port_tags):
+                raise ValueError("Lumped port aperture overlaps a conductor impedance face")
+            gmsh.model.addPhysicalGroup(2, sorted(ground_faces), 11, "reference-copper")
+            gmsh.model.addPhysicalGroup(2, sorted(signal_faces), 12, "other-copper")
+            # Keep all conductor interfaces but solve only in the surrounding
+            # air/dielectrics. Buried foil faces receive the same impedance law.
+            gmsh.model.occ.remove([(3, tag) for tag in copper_tags], recursive=False)
+            gmsh.model.occ.synchronize()
+            copper_surfaces = sorted(exposed)
         edges = sorted({tag for dim, tag in gmsh.model.getBoundary([(2, tag) for tag in [*copper_surfaces, *port_tags]], combined=False, oriented=False) if dim == 1})
         distance = gmsh.model.mesh.field.add("Distance")
         gmsh.model.mesh.field.setNumbers(distance, "CurvesList", edges)
@@ -366,10 +394,13 @@ def generate_multilayer_mesh(model, destination):
             raise ValueError(f"Degenerate/inverted tetrahedra: min SICN={minimum_quality}")
         summary = {"minimumSicn": minimum_quality, "geometryPrecisionMm": 1e-6, "nodes": len(gmsh.model.mesh.getNodes()[0]),
                    "tetrahedra": sum(len(tags) for tags in gmsh.model.mesh.getElements(3)[1]),
-                   "copperVolumeMm3": sum(gmsh.model.occ.getMass(3, tag) for tag in copper_tags),
+                   "copperVolumeMm3": copper_volume,
                    "dielectricAttributes": [a for a, _ in dielectric_counts],
                    "portAttributes": list(range(21, 21 + len(port_surfaces))),
                    "sampleLayer": layered["sampleLayer"]}
+        if surface_impedance:
+            summary.update({"copperModel": model["copperModel"], "conductivityBoundaryAttributes": [11, 12],
+                            "surfaceImpedance": model["surfaceImpedance"]})
         (destination / "mesh-summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     finally:
         gmsh.finalize()

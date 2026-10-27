@@ -48,4 +48,15 @@ with tempfile.TemporaryDirectory() as directory:
         assert "no exposed foil face" in str(error)
     else:
         raise AssertionError("Never extrapolate absent conductor current")
+    # Translate the same two physical faces to an inner foil. A hardcoded
+    # bottom-layer sampler would find no triangles and fail this contract.
+    for index in range(points.GetNumberOfPoints()):
+        x, y, z = points.GetPoint(index)
+        points.SetPoint(index, x, y, z + .25)
+    points.Modified()
+    grid.Modified()
+    assert writer.Write()
+    inner = {"copperThickness": .035, "multilayer": {"sampleLayer": "inner2", "stackup": {"copperLayers": [{"name": "inner2", "zMin": .215, "zMax": .25}]}}}
+    actual = sample_surface(path / "data.pvtu", np.array([[0, -.5], [.25, .25]]), inner, .002)
+    np.testing.assert_allclose(actual, np.array([[7-2j, 2+2j], [5-3j, -1+4j]]) * .002)
 print(json.dumps({"bothFaceSum": True, "oneFaceContact": True, "float32Plane": True, "noExtrapolation": True}))
