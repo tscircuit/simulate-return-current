@@ -77,6 +77,25 @@ test("standalone via route records retain real barrels and reject missing physic
 
 const python = process.env.PALACE_MESH_PYTHON
 test.skipIf(!python)(
+  "cropping removes zero-area copper fragments and retains port collision checks",
+  async () => {
+    const child = Bun.spawn(
+      [python!, resolve("tests/palace/cropped-copper.py")],
+      {
+        env: { ...process.env, PYTHONPATH: resolve("lib/palace/python") },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    )
+    const [err, code] = await Promise.all([
+      new Response(child.stderr).text(),
+      child.exited,
+    ])
+    expect(err).toBe("")
+    expect(code).toBe(0)
+  },
+)
+test.skipIf(!python)(
   "Python clips every net to the region and keeps a physical ground path",
   async () => {
     const dir = await mkdtemp(join(tmpdir(), "local-region-"))

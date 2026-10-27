@@ -88,7 +88,10 @@ def build_layer_copper(model, trace_caps="round"):
             shape = shape.difference(drilled)
             if not layered.get("region") and not shape.is_empty and not board.buffer(2e-6).covers(shape):
                 raise ValueError(f"Copper for {net_id} on {foil['name']} leaves the PCB")
-            groups[net_id] = shape.intersection(board)
+            # A crop tangent to a copper edge can leave isolated lines/points.
+            # They have no copper area or volume and must not enter connectivity
+            # or GEOS overlays as mixed-dimensional GeometryCollections.
+            groups[net_id] = unary_union(nonempty_polygons(shape.intersection(board)))
         copper[foil["name"]] = groups
     return clean(board), {layer: {net: clean(shape) for net, shape in groups.items()} for layer, groups in copper.items()}
 
@@ -230,12 +233,16 @@ def validate_aperture(options):
         raise ValueError("Port aperture crosses a physical PCB cutout/edge")
     for foil in model["multilayer"]["stackup"]["copperLayers"]:
         patch = projected_aperture({"port": port, "zMin": foil["zMin"], "zMax": foil["zMax"], "corners": corners})
+        if patch.is_empty:
+            continue
         copper_shape = unary_union(list(copper[foil["name"]].values()))
         intersection = patch.intersection(copper_shape)
         if intersection.area > 1e-10 or (patch.geom_type == "LineString" and intersection.length > 1e-7):
             raise ValueError("Port aperture passes through intermediate copper; select closer explicit reference pins")
     for barrel in model["multilayer"]["barrels"]:
         patch = projected_aperture({"port": port, "zMin": barrel["zMin"], "zMax": barrel["zMax"], "corners": corners})
+        if patch.is_empty:
+            continue
         hole = Polygon(points(barrel["hole"]))
         annulus = hole.buffer(barrel["platingThickness"], join_style="mitre").difference(hole)
         intersection = patch.intersection(annulus)
