@@ -242,6 +242,7 @@ export function exportReturnCurrentCircuitJson(options: {
       excitations: selected.excitations,
       frequencyHz: model.frequencyHz,
       stackup: fabricationStackup(model),
+      region: model.multilayer?.region,
       sampleLayer: reference.sampleLayer ?? "bottom",
       viaClearance: model.multilayer?.viaClearance,
       ...(model.multilayer

@@ -16,6 +16,8 @@ export interface PalaceOptions
   frequencyHz: number
   /** Required on boards with more than two copper layers. */
   stackup?: FabricationStackup
+  /** Explicit local approximation: cut all copper/dielectrics at this rectangle. */
+  region?: { minX: number; minY: number; maxX: number; maxY: number }
   /** Reference-net copper layer to sample; default bottom. */
   sampleLayer?: CopperLayer
   /** Radial clearance from foreign-net via pads; default board clearance or 0.2 mm. */
@@ -123,6 +125,7 @@ export interface PalaceReference {
 
 /** All physical copper is retained, including unexcited and floating nets. */
 export interface PalaceLayeredGeometry {
+  region?: { minX: number; minY: number; maxX: number; maxY: number }
   stackup: PhysicalStackup
   sampleLayer: CopperLayer
   referenceNetId: string

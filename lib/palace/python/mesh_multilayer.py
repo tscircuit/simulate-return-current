@@ -82,7 +82,7 @@ def build_layer_copper(model, trace_caps="round"):
                                if drill["zMin"] <= foil["zMin"] and drill["zMax"] >= foil["zMax"]])
         for net_id, shape in list(groups.items()):
             shape = shape.difference(drilled)
-            if not shape.is_empty and not board.buffer(2e-6).covers(shape):
+            if not layered.get("region") and not shape.is_empty and not board.buffer(2e-6).covers(shape):
                 raise ValueError(f"Copper for {net_id} on {foil['name']} leaves the PCB")
             groups[net_id] = shape.intersection(board)
         copper[foil["name"]] = groups
@@ -256,9 +256,9 @@ def generate_multilayer_mesh(model, destination):
             hole = Polygon(points(barrel["hole"]))
             outer = hole.buffer(barrel["platingThickness"], join_style="mitre")
             pads = Polygon(points(barrel["pads"]))
-            if not pads.buffer(2e-6).covers(outer) or not board.covers(pads):
+            if not pads.buffer(2e-6).covers(outer) or (not layered.get("region") and not board.covers(pads)):
                 raise ValueError("Plated barrel does not fit its pad/board")
-            copper_by_net.setdefault(barrel["netId"], []).extend(prism({"shape": outer.difference(hole), "zMin": barrel["zMin"], "zMax": barrel["zMax"]}))
+            copper_by_net.setdefault(barrel["netId"], []).extend(prism({"shape": outer.difference(hole).intersection(board), "zMin": barrel["zMin"], "zMax": barrel["zMax"]}))
         copper = []
         copper_groups = []
         for net_id, volumes in copper_by_net.items():

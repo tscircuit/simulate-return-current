@@ -640,3 +640,12 @@ A native 400 MHz smoke run on the four-layer reference board (blind signal vias,
 ground through-vias, inner2 return plane) completed with P1, 2 mm mesh and 0.1 mm
 sampling: 30,905 tetrahedra and 4,792 valid two-face samples. This is a functional
 check; mesh refinement is still required to establish numerical convergence.
+
+`PalaceOptions.region = { minX, minY, maxX, maxY }` optionally crops a layered
+rectangular PCB model in board-world millimetres. The complete excited route and
+both return contacts must remain inside with clearance. All nets, dielectric
+layers and intersecting drills/barrels are retained within the rectangle. The
+original Circuit JSON board is preserved; sampling and the air enclosure use the
+crop bounds. The region is included in reference provenance and model warnings.
+Remote return paths are omitted and cut boundaries affect the field, so compare
+larger margins as well as mesh refinement. This is a local approximation.
