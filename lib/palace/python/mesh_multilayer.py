@@ -351,7 +351,16 @@ def generate_multilayer_mesh(model, destination):
             port_surfaces.append(surface)
         tools = [*dielectric_volumes, *copper, *port_surfaces]
         print(f"Fragmenting {len(copper)} copper volumes and {len(dielectric_volumes)} dielectric volumes", flush=True)
-        _, mapping = gmsh.model.occ.fragment([air], tools)
+        # All input solids and ports participate in this global replacement.
+        # Gmsh rebuilds their boundaries from the result, so recursive upward
+        # dependency checks while discarding the old entities are unnecessary.
+        # This changes tag cleanup, not the Boolean geometry or its ownership map.
+        previous_unbind = gmsh.option.getNumber("Geometry.OCCFastUnbind")
+        gmsh.option.setNumber("Geometry.OCCFastUnbind", 2)
+        try:
+            _, mapping = gmsh.model.occ.fragment([air], tools)
+        finally:
+            gmsh.option.setNumber("Geometry.OCCFastUnbind", previous_unbind)
         gmsh.model.occ.synchronize()
         print("Physical volume fragmentation complete", flush=True)
         copper_offset = 1 + len(dielectric_volumes)
