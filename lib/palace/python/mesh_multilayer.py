@@ -47,7 +47,7 @@ def build_layer_copper(model, trace_caps="round"):
             if barrel["netId"] == other["netId"] or min(barrel["zMax"], other["zMax"]) <= max(barrel["zMin"], other["zMin"]):
                 continue
             other_outer = barrel_shapes[other_index]
-            if outer.intersection(other_outer).area > 1e-10:
+            if outer.intersection(other_outer).intersection(board).area > 1e-10:
                 raise ValueError("Different-net plated barrels overlap")
     copper = {}
     for foil in layered["stackup"]["copperLayers"]:
@@ -120,6 +120,9 @@ def layer_copper(model):
 def validate_reference_connectivity(model, copper):
     layered = model["multilayer"]
     reference_net = layered["referenceNetId"]
+    board = Polygon(points(model["geometry"]["boardOutline"]))
+    for cutout in layered["boardCutouts"]:
+        board = board.difference(Polygon(points(cutout)))
     nodes = []
     for foil in layered["stackup"]["copperLayers"]:
         for shape in nonempty_polygons(copper[foil["name"]].get(reference_net, Polygon())):
@@ -128,7 +131,7 @@ def validate_reference_connectivity(model, copper):
         if barrel["netId"] != reference_net:
             continue
         hole = Polygon(points(barrel["hole"]))
-        nodes.append({"shape": hole.buffer(barrel["platingThickness"], join_style="mitre").difference(hole),
+        nodes.append({"shape": hole.buffer(barrel["platingThickness"], join_style="mitre").difference(hole).intersection(board),
                       "zMin": barrel["zMin"], "zMax": barrel["zMax"], "layer": None})
     adjacency = [set() for _ in nodes]
     for index, node in enumerate(nodes):
@@ -261,9 +264,10 @@ def generate_multilayer_mesh(model, destination):
             copper_by_net.setdefault(barrel["netId"], []).extend(prism({"shape": outer.difference(hole).intersection(board), "zMin": barrel["zMin"], "zMax": barrel["zMax"]}))
         copper = []
         copper_groups = []
+        # The final fragment operation already unites overlapping volumes and
+        # maps every input to its descendants. Avoid an expensive duplicate
+        # per-net fuse on dense BGA crops; copper groups retain their ownership.
         for net_id, volumes in copper_by_net.items():
-            if len(volumes) > 1:
-                volumes, _ = gmsh.model.occ.fuse(volumes[:1], volumes[1:])
             copper.extend(volumes)
             copper_groups.append((net_id, len(volumes)))
         if not copper:
@@ -318,8 +322,10 @@ def generate_multilayer_mesh(model, destination):
                                     "copper": planar_copper, "board": board, "signalNetId": owners[0]})
             port_surfaces.append(surface)
         tools = [*dielectric_volumes, *copper, *port_surfaces]
+        print(f"Fragmenting {len(copper)} copper volumes and {len(dielectric_volumes)} dielectric volumes", flush=True)
         _, mapping = gmsh.model.occ.fragment([air], tools)
         gmsh.model.occ.synchronize()
+        print("Physical volume fragmentation complete", flush=True)
         copper_offset = 1 + len(dielectric_volumes)
         copper_tags = {tag for desc in mapping[copper_offset:copper_offset + len(copper)] for dim, tag in desc if dim == 3}
         if not surface_impedance:
