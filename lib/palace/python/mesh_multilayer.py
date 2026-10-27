@@ -16,9 +16,13 @@ def clean(shape):
 
 
 def nonempty_polygons(shape):
-    if shape.is_empty:
+    if shape.is_empty or shape.area <= 1e-12:
         return []
-    return [p for p in polygons(shape) if p.area > 1e-12]
+    if shape.geom_type == "Polygon":
+        return [shape]
+    if shape.geom_type in ("MultiPolygon", "GeometryCollection"):
+        return [polygon for part in shape.geoms for polygon in nonempty_polygons(part)]
+    raise ValueError("Expected polygonal copper")
 
 
 def prism(options):
@@ -246,6 +250,8 @@ def generate_multilayer_mesh(model, destination):
     validate_reference_connectivity(model, planar_copper)
     gmsh.initialize()
     try:
+        gmsh.option.setNumber("General.NumThreads", 4)
+        gmsh.option.setNumber("Geometry.OCCParallel", 1)
         gmsh.option.setNumber("Geometry.Tolerance", 1e-6)
         gmsh.option.setNumber("Geometry.ToleranceBoolean", 1e-6)
         gmsh.model.add("multilayer-return-current")
@@ -261,7 +267,19 @@ def generate_multilayer_mesh(model, destination):
             pads = Polygon(points(barrel["pads"]))
             if not pads.buffer(2e-6).covers(outer) or (not layered.get("region") and not board.covers(pads)):
                 raise ValueError("Plated barrel does not fit its pad/board")
-            copper_by_net.setdefault(barrel["netId"], []).extend(prism({"shape": outer.difference(hole).intersection(board), "zMin": barrel["zMin"], "zMax": barrel["zMax"]}))
+            # Foil shapes already contain the barrel annulus. Extrude only the
+            # remaining spans, preserving the copper union without overlapping
+            # solids that make the global Boolean operation much more expensive.
+            boundaries = sorted({barrel["zMin"], barrel["zMax"], *[
+                z for foil in foil_layers for z in (foil["zMin"], foil["zMax"])
+                if barrel["zMin"] < z < barrel["zMax"]
+            ]})
+            for a, b in zip(boundaries, boundaries[1:]):
+                if any(foil["zMin"] <= a and b <= foil["zMax"] for foil in foil_layers):
+                    continue
+                copper_by_net.setdefault(barrel["netId"], []).extend(prism({
+                    "shape": outer.difference(hole).intersection(board), "zMin": a, "zMax": b
+                }))
         copper = []
         copper_groups = []
         # The final fragment operation already unites overlapping volumes and

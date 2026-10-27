@@ -448,6 +448,7 @@ def create_configuration(model, port_count):
                 "MaxIts": 200,
                 "ComplexCoarseSolve": True,
                 "PCMatShifted": False,
+                "EstimatorMG": bool(model.get("multilayer")),
             },
         },
     }
