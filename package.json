@@ -62,7 +62,16 @@
     "react-cosmos-plugin-vite": "7.4.0",
     "react-dom": "19.2.6",
     "typescript": "5.9.3",
-    "vite": "7.3.6"
+    "vite": "7.3.6",
+    "earcut": "3.0.2",
+    "@tscircuit/copper-pour-solver": "0.0.47",
+    "@tscircuit/infer-cable-insertion-point": "0.0.3",
+    "@tscircuit/miniflex": "0.0.4",
+    "calculate-elbow": "0.0.12",
+    "minicssgrid": "0.0.9",
+    "spicey": "0.0.14",
+    "@tscircuit/soup-util": "0.0.41",
+    "@tscircuit/math-utils": "0.0.36"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
