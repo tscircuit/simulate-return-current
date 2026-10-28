@@ -448,6 +448,7 @@ def create_configuration(model, port_count):
                 "MaxIts": 200,
                 "ComplexCoarseSolve": True,
                 "PCMatShifted": False,
+                "EstimatorMG": bool(model.get("multilayer")),
             },
         },
     }
@@ -461,7 +462,8 @@ def create_configuration(model, port_count):
               for layer in model["multilayer"]["stackup"]["dielectrics"]]
         ]
     if model["copperModel"] == "surface_impedance_copper":
-        configuration["Domains"]["Materials"] = configuration["Domains"]["Materials"][:2]
+        configuration["Domains"]["Materials"] = [material for material in configuration["Domains"]["Materials"]
+                                                  if 3 not in material["Attributes"]]
         configuration["Boundaries"]["Conductivity"] = [{
             "Attributes": [11, 12], "Conductivity": model["copperConductivity"],
             "Permeability": 1.0, "External": True,

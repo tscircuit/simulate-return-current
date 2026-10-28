@@ -5,6 +5,8 @@ import { portNetIds } from "../port-connectivity"
 import type { PalaceModel, PalaceOptions, PalaceTerminalPort } from "./types"
 
 export function createPalaceModel(options: PalaceOptions): PalaceModel {
+  if (options.region && !options.stackup)
+    throw new Error("Local regions require an explicit fabrication stackup")
   if (
     options.stackup ||
     options.circuitJson.some(

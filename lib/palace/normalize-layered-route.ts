@@ -2,6 +2,12 @@ import type { PcbTrace } from "circuit-json"
 
 /** Core may emit wire→via→via→wire without duplicate wire vertices at vias. */
 export function normalizeLayeredRoute(trace: PcbTrace): PcbTrace {
+  // Some routers store standalone via records; physical barrels are validated separately.
+  if (
+    trace.route.length &&
+    trace.route.every((point) => point.route_type === "via")
+  )
+    return trace
   const route: PcbTrace["route"] = []
   for (const [index, point] of trace.route.entries()) {
     if (point.route_type === "wire") {

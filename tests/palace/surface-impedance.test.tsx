@@ -96,7 +96,7 @@ test("surface impedance is explicit, retains 35µm foil/barrels and enforces its
       copperModel: "surface_impedance_copper",
       stackup: { layers: [] } as never,
     }),
-  ).toThrow("two-layer")
+  ).toThrow("Stackup must alternate")
 })
 
 test("surface references identify their current units and cannot attach to a volume model", async () => {

@@ -34,10 +34,12 @@ export function createMultilayerPalaceModel(
   const boards = options.circuitJson.filter((e) => e.type === "pcb_board")
   if (boards.length !== 1) throw new Error("Exactly one PCB board is required")
   const board = boards[0]
-  if (options.copperModel === "surface_impedance_copper")
-    throw new Error(
-      "surface_impedance_copper currently supports the two-layer mesher only",
-    )
+  const copperModel = options.copperModel ?? "volumetric_copper"
+  if (
+    copperModel !== "volumetric_copper" &&
+    copperModel !== "surface_impedance_copper"
+  )
+    throw new Error("Unknown copperModel")
   if (!options.stackup)
     throw new Error(
       "Multilayer boards require an explicit fabrication stackup (--stackup-file); layer spacing is not inferred",
@@ -74,6 +76,7 @@ export function createMultilayerPalaceModel(
     1000 /
     Math.sqrt(Math.PI * frequencyHz * 4e-7 * Math.PI * copperConductivity)
   if (
+    copperModel === "volumetric_copper" &&
     stackup.copperLayers.some((layer) => layer.zMax - layer.zMin > skinDepthMm)
   )
     throw new Error(
@@ -89,13 +92,74 @@ export function createMultilayerPalaceModel(
     throw new Error("Specify excitations sharing one reference net")
   const referenceNetId = excitations[0].ground_source_net_id
   const connectivity = copperConnectivity(options.circuitJson)
-  const boardOutline = board.outline?.length
+  let boardOutline = board.outline?.length
     ? board.outline
     : rectangleOutline({
         center: board.center,
         width: board.width ?? 0,
         height: board.height ?? 0,
       })
+  const region = options.region
+  if (region) {
+    if (board.outline?.length || !board.width || !board.height)
+      throw new Error(
+        "Local regions currently require a rectangular PCB outline",
+      )
+    const { minX, minY, maxX, maxY } = region
+    if (
+      ![minX, minY, maxX, maxY].every(Number.isFinite) ||
+      minX >= maxX ||
+      minY >= maxY
+    )
+      throw new Error("Local region must have finite positive dimensions")
+    if (
+      minX < board.center.x - board.width / 2 ||
+      maxX > board.center.x + board.width / 2 ||
+      minY < board.center.y - board.height / 2 ||
+      maxY > board.center.y + board.height / 2
+    )
+      throw new Error("Local region must lie inside the original PCB")
+    boardOutline = [
+      { x: minX, y: minY },
+      { x: maxX, y: minY },
+      { x: maxX, y: maxY },
+      { x: minX, y: maxY },
+    ]
+    for (const excitation of excitations) {
+      const trace = options.circuitJson.find(
+        (e) =>
+          e.type === "pcb_trace" && e.pcb_trace_id === excitation.pcb_trace_id,
+      )
+      if (trace?.type !== "pcb_trace") throw new Error("Missing excited trace")
+      const points = trace.route.flatMap((point) => {
+        if (point.route_type === "through_pad")
+          throw new Error("Through-pad signal routes are unsupported")
+        return [
+          {
+            x: point.x,
+            y: point.y,
+            radius: point.route_type === "wire" ? point.width / 2 : 0,
+          },
+        ]
+      })
+      for (const point of [
+        ...points,
+        { ...excitation.return_source, radius: 0 },
+        { ...excitation.return_sink, radius: 0 },
+      ]) {
+        const radius = point.radius
+        if (
+          point.x - radius <= minX ||
+          point.x + radius >= maxX ||
+          point.y - radius <= minY ||
+          point.y + radius >= maxY
+        )
+          throw new Error(
+            "Local region must contain the complete signal and both return contacts with clearance",
+          )
+      }
+    }
+  }
   const boardCutouts = options.circuitJson
     .filter((e) => e.type === "pcb_cutout")
     .map(cutoutOutline)
@@ -105,6 +169,7 @@ export function createMultilayerPalaceModel(
   )
   const layered: PalaceLayeredGeometry = {
     stackup,
+    ...(region ? { region } : {}),
     sampleLayer,
     referenceNetId,
     viaClearance,
@@ -308,6 +373,20 @@ export function createMultilayerPalaceModel(
           `Trace ${trace.pcb_trace_id} changes layer without a matching physical pcb_via`,
         )
     }
+  if (region) {
+    const intersects = (points: { x: number; y: number }[]) =>
+      Math.max(...points.map((p) => p.x)) > region.minX &&
+      Math.min(...points.map((p) => p.x)) < region.maxX &&
+      Math.max(...points.map((p) => p.y)) > region.minY &&
+      Math.min(...points.map((p) => p.y)) < region.maxY
+    layered.barrels = layered.barrels.filter((barrel) =>
+      intersects(barrel.pads),
+    )
+    layered.drills = layered.drills.filter((drill) => intersects(drill.hole))
+    layered.audit.warnings.push(
+      "Local-region approximation: all nets are clipped at the specified rectangle; omitted remote return paths and cut boundaries can change the field. Compare larger margins for convergence.",
+    )
+  }
   for (const barrel of layered.barrels)
     barrel.clearance = barrelClearanceOutline(barrel, viaClearance)
   const groundCopper = copperByKey.get(`${sampleLayer}:${referenceNetId}`)!
@@ -439,6 +518,17 @@ export function createMultilayerPalaceModel(
     layered.audit.warnings.push(
       `Explicit stack sums to ${stackup.physicalThicknessMm} mm, nominal ${stackup.nominalBoardThicknessMm} mm; explicit dimensions are used without scaling.`,
     )
+  const minimumCopperThickness = Math.min(
+    ...stackup.copperLayers.map((layer) => layer.zMax - layer.zMin),
+    ...layered.barrels.map((barrel) => barrel.platingThickness),
+  )
+  if (
+    copperModel === "surface_impedance_copper" &&
+    minimumCopperThickness < 3 * skinDepthMm
+  )
+    throw new Error(
+      "The half-space surface-impedance model requires every foil and via-wall thickness >= 3 skin depths; use volumetric copper at lower frequencies",
+    )
   geometry.physicalModelSignature = JSON.stringify({
     ...layered,
     traceEndCaps: "round_32",
@@ -466,7 +556,17 @@ export function createMultilayerPalaceModel(
     meshSize: positiveFinite(options.meshSize ?? 1, "meshSize"),
     airPadding: positiveFinite(options.airPadding ?? 10, "airPadding"),
     order,
-    copperModel: "volumetric_copper",
+    copperModel,
+    ...(copperModel === "surface_impedance_copper"
+      ? {
+          surfaceImpedance: {
+            boundaryModel: "half_space" as const,
+            skinDepthMm,
+            minimumThicknessToSkinDepth: minimumCopperThickness / skinDepthMm,
+            currentSampling: "sum_foil_face_surface_currents" as const,
+          },
+        }
+      : {}),
   }
 }
 
@@ -484,6 +584,12 @@ function validateLayeredRoute(trace: PcbTrace, layers: string[]) {
       if (previous?.route_type === "wire" && previous.layer !== route.layer)
         throw new Error("Layer transitions require a via route point")
     } else if (route.route_type === "via") {
+      if (
+        !layers.includes(route.from_layer) ||
+        !layers.includes(route.to_layer)
+      )
+        throw new Error("Unknown via route layer")
+      if (trace.route.every((point) => point.route_type === "via")) continue
       const previous = trace.route[index - 1],
         next = trace.route[index + 1]
       if (

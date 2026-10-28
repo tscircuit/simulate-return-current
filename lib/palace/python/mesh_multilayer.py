@@ -2,13 +2,16 @@
 This builds physical geometry only; Palace solves Maxwell's equations.
 """
 import json
+import math
+import time
 import gmsh
 from shapely.geometry import Polygon, LineString
-from shapely.ops import unary_union
-from shapely import set_precision
+from shapely.ops import unary_union, polygonize
+from shapely import set_precision, union_all
 from shapely.geometry import Point
 from shapely.strtree import STRtree
-from mesh import points, add_polygon, polygons
+from shapely.geometry.polygon import orient
+from mesh import points
 
 
 def clean(shape):
@@ -16,16 +19,13 @@ def clean(shape):
 
 
 def nonempty_polygons(shape):
-    if shape.is_empty:
+    if shape.is_empty or shape.area <= 1e-12:
         return []
-    return [p for p in polygons(shape) if p.area > 1e-12]
-
-
-def prism(options):
-    shape, z_min, z_max = [options[k] for k in ["shape", "zMin", "zMax"]]
-    return [entity for polygon in nonempty_polygons(clean(shape))
-            for entity in gmsh.model.occ.extrude([add_polygon(polygon, z_min)], 0, 0, z_max - z_min)
-            if entity[0] == 3]
+    if shape.geom_type == "Polygon":
+        return [shape]
+    if shape.geom_type in ("MultiPolygon", "GeometryCollection"):
+        return [polygon for part in shape.geoms for polygon in nonempty_polygons(part)]
+    raise ValueError("Expected polygonal copper")
 
 
 def build_layer_copper(model, trace_caps="round"):
@@ -47,7 +47,7 @@ def build_layer_copper(model, trace_caps="round"):
             if barrel["netId"] == other["netId"] or min(barrel["zMax"], other["zMax"]) <= max(barrel["zMin"], other["zMin"]):
                 continue
             other_outer = barrel_shapes[other_index]
-            if outer.intersection(other_outer).area > 1e-10:
+            if outer.intersection(other_outer).intersection(board).area > 1e-10:
                 raise ValueError("Different-net plated barrels overlap")
     copper = {}
     for foil in layered["stackup"]["copperLayers"]:
@@ -82,9 +82,12 @@ def build_layer_copper(model, trace_caps="round"):
                                if drill["zMin"] <= foil["zMin"] and drill["zMax"] >= foil["zMax"]])
         for net_id, shape in list(groups.items()):
             shape = shape.difference(drilled)
-            if not shape.is_empty and not board.buffer(2e-6).covers(shape):
+            if not layered.get("region") and not shape.is_empty and not board.buffer(2e-6).covers(shape):
                 raise ValueError(f"Copper for {net_id} on {foil['name']} leaves the PCB")
-            groups[net_id] = shape.intersection(board)
+            # A crop tangent to a copper edge can leave isolated lines/points.
+            # They have no copper area or volume and must not enter connectivity
+            # or GEOS overlays as mixed-dimensional GeometryCollections.
+            groups[net_id] = unary_union(nonempty_polygons(shape.intersection(board)))
         copper[foil["name"]] = groups
     return clean(board), {layer: {net: clean(shape) for net, shape in groups.items()} for layer, groups in copper.items()}
 
@@ -120,6 +123,9 @@ def layer_copper(model):
 def validate_reference_connectivity(model, copper):
     layered = model["multilayer"]
     reference_net = layered["referenceNetId"]
+    board = Polygon(points(model["geometry"]["boardOutline"]))
+    for cutout in layered["boardCutouts"]:
+        board = board.difference(Polygon(points(cutout)))
     nodes = []
     for foil in layered["stackup"]["copperLayers"]:
         for shape in nonempty_polygons(copper[foil["name"]].get(reference_net, Polygon())):
@@ -128,7 +134,7 @@ def validate_reference_connectivity(model, copper):
         if barrel["netId"] != reference_net:
             continue
         hole = Polygon(points(barrel["hole"]))
-        nodes.append({"shape": hole.buffer(barrel["platingThickness"], join_style="mitre").difference(hole),
+        nodes.append({"shape": hole.buffer(barrel["platingThickness"], join_style="mitre").difference(hole).intersection(board),
                       "zMin": barrel["zMin"], "zMax": barrel["zMax"], "layer": None})
     adjacency = [set() for _ in nodes]
     for index, node in enumerate(nodes):
@@ -191,11 +197,10 @@ def port_surface(options):
             raise ValueError(f"Coplanar port does not contact both intended conductors: signal={patch.boundary.intersection(intended_signal.boundary.buffer(2e-6)).length}, reference={patch.boundary.intersection(reference_shapes.boundary.buffer(2e-6)).length}, width={model['portWidth']}")
         if not board.covers(patch):
             raise ValueError("Port crosses board cutout/edge")
-        return add_polygon(patch, port["signalZ"])
+        return {"kind": "coplanar", "patch": clean(patch), "z": port["signalZ"]}
     validate_aperture({"model": model, "port": port, "corners": corners, "copper": copper, "board": board})
-    vertices = [gmsh.model.occ.addPoint(*c) for c in corners]
-    edges = [gmsh.model.occ.addLine(vertices[i], vertices[(i + 1) % 4]) for i in range(4)]
-    return (2, gmsh.model.occ.addPlaneSurface([gmsh.model.occ.addCurveLoop(edges)]))
+    return {"kind": "quad", "signal": (signal["x"], signal["y"]), "reference": (reference["x"], reference["y"]),
+            "halfWidth": (tx, ty), "signalZ": port["signalZ"], "referenceZ": port["referenceZ"]}
 
 
 
@@ -223,12 +228,16 @@ def validate_aperture(options):
         raise ValueError("Port aperture crosses a physical PCB cutout/edge")
     for foil in model["multilayer"]["stackup"]["copperLayers"]:
         patch = projected_aperture({"port": port, "zMin": foil["zMin"], "zMax": foil["zMax"], "corners": corners})
+        if patch.is_empty:
+            continue
         copper_shape = unary_union(list(copper[foil["name"]].values()))
         intersection = patch.intersection(copper_shape)
         if intersection.area > 1e-10 or (patch.geom_type == "LineString" and intersection.length > 1e-7):
             raise ValueError("Port aperture passes through intermediate copper; select closer explicit reference pins")
     for barrel in model["multilayer"]["barrels"]:
         patch = projected_aperture({"port": port, "zMin": barrel["zMin"], "zMax": barrel["zMax"], "corners": corners})
+        if patch.is_empty:
+            continue
         hole = Polygon(points(barrel["hole"]))
         annulus = hole.buffer(barrel["platingThickness"], join_style="mitre").difference(hole)
         intersection = patch.intersection(annulus)
@@ -236,64 +245,476 @@ def validate_aperture(options):
             raise ValueError("Port aperture passes through a plated barrel; select a clear terminal gap")
 
 
-def generate_multilayer_mesh(model, destination):
+def stack_intervals(layered):
+    """Z intervals between every foil, slab, barrel and drill boundary."""
+    foils = layered["stackup"]["copperLayers"]
+    z_min, z_max = foils[-1]["zMin"], foils[0]["zMax"]
+    levels = []
+    for z in sorted({z for item in [*foils, *layered["stackup"]["dielectrics"], *layered["barrels"], *layered["drills"]]
+                     for z in (item["zMin"], item["zMax"])}):
+        if z_min - 1e-9 <= z <= z_max + 1e-9 and (not levels or z - levels[-1] > 1e-9):
+            levels.append(z)
+    return list(zip(levels, levels[1:]))
+
+
+# Parts of a piece thinner than 2 * SLIVER_MM move to their neighbour. The
+# 0.5 um shift is far below the 3.3 um skin depth at 400 MHz and etch
+# tolerance, while 1 nm necks left by unions and crops break surface meshing.
+SLIVER_MM = 5e-4
+
+
+def remove_slivers(entries):
+    """Reassign sub-micron slivers inside one interval's planar partition.
+
+    The partition stays complete and disjoint: each sliver leaves one piece
+    and joins the neighbour sharing most of its boundary.
+    """
+    entries = [[material, shape] for material, shape in entries]
+    for index in range(len(entries)):
+        shape = entries[index][1]
+        if shape.is_empty:
+            continue
+        kept = shape.buffer(-SLIVER_MM, join_style="mitre").buffer(SLIVER_MM, join_style="mitre").intersection(shape)
+        for sliver in nonempty_polygons(clean(shape.difference(kept))):
+            touching = [(sliver.boundary.intersection(other.buffer(1e-6)).length, other_index)
+                        for other_index, (_, other) in enumerate(entries)
+                        if other_index != index and not other.is_empty and other.distance(sliver) < 1e-6]
+            if not touching:
+                continue
+            _, target = max(touching)
+            entries[target][1] = clean(unary_union([entries[target][1], sliver]))
+            entries[index][1] = clean(entries[index][1].difference(sliver))
+    return entries
+
+
+def partition_pieces(model, board, planar_copper, box):
+    """Disjoint 2D material pieces for each z interval of the board stack.
+
+    Material ownership matches the former overlapping-solid construction:
+    copper wins, drilled holes and outer-foil gaps are air, inner-foil gaps
+    belong to the slab above, and the air padding ring surrounds the board.
+    """
     layered = model["multilayer"]
+    foils = layered["stackup"]["copperLayers"]
+    slabs = layered["stackup"]["dielectrics"]
+    ring = clean(box.difference(board))
+    pieces = []
+    annuli = [(barrel, clean(Polygon(points(barrel["hole"])).buffer(barrel["platingThickness"], join_style="mitre")
+                             .difference(Polygon(points(barrel["hole"]))).intersection(board)))
+              for barrel in layered["barrels"]]
+    for a, b in stack_intervals(layered):
+        foil = next((f for f in foils if f["zMin"] - 1e-9 <= a and b <= f["zMax"] + 1e-9), None)
+        drilled = clean(unary_union([Polygon(points(d["hole"])) for d in layered["drills"]
+                                     if d["zMin"] <= a + 1e-9 and d["zMax"] >= b - 1e-9]))
+        if foil:
+            copper = planar_copper[foil["name"]]
+            if foil is foils[0] or foil is foils[-1]:
+                fill = ("air",)
+            else:
+                above = next((s for s in slabs if abs(s["zMin"] - foil["zMax"]) < 1e-8), None)
+                if not above:
+                    raise ValueError(f"No dielectric above inner foil {foil['name']}")
+                fill = ("dielectric", above["attribute"])
+        else:
+            copper = {}
+            for barrel, annulus in annuli:
+                if barrel["zMin"] <= a + 1e-9 and barrel["zMax"] >= b - 1e-9:
+                    copper[barrel["netId"]] = unary_union([copper.get(barrel["netId"], Polygon()), annulus])
+            copper = {net: clean(shape) for net, shape in copper.items()}
+            slab = next((s for s in slabs if s["zMin"] - 1e-9 <= a and b <= s["zMax"] + 1e-9), None)
+            if not slab:
+                raise ValueError(f"No stackup layer spans z={a}..{b}")
+            fill = ("dielectric", slab["attribute"])
+        metal = unary_union(list(copper.values()))
+        holes = clean(drilled.difference(metal))
+        rest = clean(board.difference(metal).difference(holes))
+        entries = [(("copper", net_id), shape) for net_id, shape in copper.items()]
+        if fill == ("air",):
+            entries.append((("air",), clean(unary_union([ring, holes, rest]))))
+        else:
+            entries.extend([(("air",), clean(unary_union([ring, holes]))), (fill, rest)])
+        for material, shape in remove_slivers(entries):
+            if not shape.is_empty:
+                pieces.append({"material": material, "shape": shape, "zMin": a, "zMax": b})
+    return pieces
+
+
+def node_key(x, y):
+    """Planar vertex identity on the 1 nm geometry grid."""
+    return (round(x * 1e6), round(y * 1e6))
+
+
+def planar_cells(lines):
+    """Polygonize the layers' combined linework after snap-rounding it.
+
+    Snap-rounding to the sliver grid merges vertices and edges from different
+    layers that nearly coincide, so no cell edge is shorter than SLIVER_MM.
+    Sub-micron edges next to millimetre elements made 3D boundary recovery fail.
+    A fixed-precision union is required: floating-point noding can leave a
+    vertex lying on another edge unsplit, creating zero-width spikes in rings.
+    """
+    noded = union_all(lines, grid_size=SLIVER_MM)
+    cells = list(polygonize(noded))
+    # Grid-scale cells (a few snapped vertices) join the neighbour sharing most
+    # of their boundary; dropping them would leave holes in the partition.
+    tree = STRtree(cells)
+    tiny = sorted((i for i, cell in enumerate(cells) if cell.area <= SLIVER_MM ** 2), key=lambda i: cells[i].area)
+    merged = set()
+    for index in tiny:
+        shared = [(cells[index].boundary.intersection(cells[other].boundary).length, other)
+                  for other in tree.query(cells[index], predicate="intersects")
+                  if other != index and other not in merged]
+        if not shared or max(shared)[0] <= 0:
+            raise ValueError(f"Isolated grid-scale cell near {cells[index].representative_point().coords[0]}")
+        target = max(shared)[1]
+        cells[target] = union_all([cells[target], cells[index]], grid_size=SLIVER_MM)
+        merged.add(index)
+    cells = [cell for i, cell in enumerate(cells) if i not in merged]
+    invalid = [cell for cell in cells if not cell.is_valid]
+    if invalid:
+        raise ValueError(f"Planar overlay produced an invalid cell near {invalid[0].representative_point().coords[0]}")
+    return cells
+
+
+def covering(tree, shapes, point, what):
+    """Index of the shape covering point, allowing for snap-rounding drift."""
+    hits = [i for i in tree.query(point, predicate="intersects") if shapes[i].covers(point)]
+    if hits:
+        return hits[0]
+    # Snap-rounding can move a cell up to half a grid step off its piece.
+    nearest = int(tree.query_nearest(point)[0])
+    if shapes[nearest].distance(point) > SLIVER_MM:
+        raise ValueError(f"{what} at {point.coords[0]} has no material")
+    return nearest
+
+
+def overlay_cells(pieces, box, cuts):
+    """One planar arrangement shared by every interval.
+
+    Each cell is labelled with its material in every interval. Cells thinner
+    than 2 * SLIVER_MM adopt the neighbour sharing most of their boundary
+    (edges on different layers that nearly coincide), then adjacent cells with
+    identical labels dissolve so faces only remain where some material changes.
+    Port cut lines are added last so their edges survive dissolving.
+    """
+    intervals = sorted({(p["zMin"], p["zMax"]) for p in pieces})
+    lookup = []
+    for interval in intervals:
+        members = [p for p in pieces if (p["zMin"], p["zMax"]) == interval]
+        shapes = [p["shape"] for p in members]
+        lookup.append((STRtree(shapes), shapes, members))
+
+    def label(cell):
+        point = cell.representative_point()
+        return tuple(members[covering(tree, shapes, point, "Planar cell")]["material"]
+                     for tree, shapes, members in lookup)
+
+    cells = planar_cells([box.boundary, *[p["shape"].boundary for p in pieces]])
+    labels = [label(cell) for cell in cells]
+    tree = STRtree(cells)
+    for index, cell in enumerate(cells):
+        if not cell.buffer(-SLIVER_MM, join_style="mitre").is_empty:
+            continue
+        shared = [(cell.boundary.intersection(cells[other].boundary).length, other)
+                  for other in tree.query(cell, predicate="intersects") if other != index]
+        if shared and max(shared)[0] > 0:
+            labels[index] = labels[max(shared)[1]]
+    groups = {}
+    for cell, cell_label in zip(cells, labels):
+        groups.setdefault(cell_label, []).append(cell)
+    regions = [(cell_label, unary_union(members)) for cell_label, members in groups.items()]
+    region_shapes = [region for _, region in regions]
+    region_tree = STRtree(region_shapes)
+    final, final_labels = [], []
+    for cell in planar_cells([box.boundary, *[r.boundary for r in region_shapes], *cuts]):
+        final.append(cell)
+        final_labels.append(regions[covering(region_tree, region_shapes, cell.representative_point(), "Dissolved cell")][0])
+    return intervals, final, final_labels
+
+
+def build_layered_brep(cells, labels, levels, forced_lateral, forced_horizontal, protected, slanted):
+    """Hand-built conforming B-rep from planar cells stacked over z levels.
+
+    Step k spans levels[k]..levels[k+1]; labels[c][k] is cell c's material
+    there. Faces exist only where materials differ (or where a port is forced),
+    so no 3D Boolean is needed: shared curves are created once and reused.
+    Returns volumes with materials, and faces with the material on each side.
+    """
+    g = gmsh.model.geo
+    steps = len(levels) - 1
+
+    xy, edges, rings = {}, {}, []
+    for index, cell in enumerate(cells):
+        cell_rings = []
+        # Shells counter-clockwise and holes clockwise, so shared seams cancel.
+        cell = orient(cell, sign=1.0)
+        for ring in [cell.exterior, *cell.interiors]:
+            ids = []
+            for x, y in ring.coords[:-1]:
+                k = node_key(x, y)
+                xy.setdefault(k, (x, y))
+                if not ids or ids[-1] != k:
+                    ids.append(k)
+            if len(ids) > 1 and ids[0] == ids[-1]:
+                ids.pop()
+            loop = []
+            for a, b in zip(ids, ids[1:] + ids[:1]):
+                edge = (a, b) if a < b else (b, a)
+                edges.setdefault(edge, []).append(index)
+                loop.append((edge, a < b))
+            cell_rings.append(loop)
+        rings.append(cell_rings)
+    for edge, owners in edges.items():
+        if len(owners) > 2:
+            raise ValueError("Planar edge shared by more than two cells")
+    if any(edge not in edges for edge, _ in forced_lateral):
+        raise ValueError("Port segment is not a run of planar edges")
+
+    parent = list(range(len(cells) * steps))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        parent[find(i)] = find(j)
+
+    for owners in edges.values():
+        if len(owners) == 2:
+            for k in range(steps):
+                if labels[owners[0]][k] == labels[owners[1]][k]:
+                    union(owners[0] * steps + k, owners[1] * steps + k)
+    for c in range(len(cells)):
+        for k in range(steps - 1):
+            if labels[c][k] == labels[c][k + 1]:
+                union(c * steps + k, c * steps + k + 1)
+
+    points, hlines, vlines = {}, {}, {}
+
+    def point(node, level):
+        if (node, level) not in points:
+            points[(node, level)] = g.addPoint(*xy[node], levels[level])
+        return points[(node, level)]
+
+    def hline(edge, level):
+        if (edge, level) not in hlines:
+            hlines[(edge, level)] = g.addLine(point(edge[0], level), point(edge[1], level))
+        return hlines[(edge, level)]
+
+    def vline(node, step):
+        if (node, step) not in vlines:
+            vlines[(node, step)] = g.addLine(point(node, step), point(node, step + 1))
+        return vlines[(node, step)]
+
+    faces = []  # tag, comp on each side (None is outside), curve tags, bbox
+
+    def side(c, k):
+        return None if c is None or k < 0 or k >= steps else find(c * steps + k)
+
+    def material(c, k):
+        return None if c is None or k < 0 or k >= steps else labels[c][k]
+
+    for edge, owners in edges.items():
+        a, b = owners if len(owners) == 2 else (owners[0], None)
+        k = 0
+        while k < steps:
+            forced = (edge, k) in forced_lateral
+            if material(a, k) == material(b, k) and not forced:
+                k += 1
+                continue
+            # Stack steps with the same materials on both sides into one face:
+            # per-step strips as thin as a foil produced flat boundary tets.
+            # Neither cell changes material at the levels in between, so no
+            # horizontal face needs those level lines.
+            end = k + 1
+            while (not forced and end < steps and (edge, end) not in forced_lateral
+                   and (material(a, end), material(b, end)) == (material(a, k), material(b, k))):
+                end += 1
+            curves = [hline(edge, k), *[vline(edge[1], j) for j in range(k, end)], -hline(edge, end),
+                      *[-vline(edge[0], j) for j in reversed(range(k, end))]]
+            tag = g.addPlaneSurface([g.addCurveLoop(curves)])
+            (x0, y0), (x1, y1) = xy[edge[0]], xy[edge[1]]
+            faces.append({"tag": tag, "sides": (side(a, k), side(b, k)), "materials": (material(a, k), material(b, k)),
+                          "curves": [abs(c) for c in curves], "forced": forced, "kind": ("lateral", edge, k),
+                          "bbox": (min(x0, x1), min(y0, y1), levels[k], max(x0, x1), max(y0, y1), levels[end])})
+            k = end
+    def signed_area(loop):
+        coords = [xy[u] for u, _ in loop]
+        return sum(x0 * y1 - x1 * y0 for (x0, y0), (x1, y1) in zip(coords, coords[1:] + coords[:1])) / 2
+
+    for level in range(steps + 1):
+        # Adjacent cells with the same materials below and above share one
+        # face: edges inside it would only constrain the mesh (flat boundary
+        # tetrahedra formed on the outer box when it was tiled by every cell).
+        members = [c for c in range(len(cells))
+                   if material(c, level - 1) != material(c, level) or (c, level) in forced_horizontal]
+        group = {c: c for c in members}
+
+        def root(c):
+            while group[c] != c:
+                group[c] = group[group[c]]
+                c = group[c]
+            return c
+
+        for edge, owners in edges.items():
+            if len(owners) != 2 or not all(c in group for c in owners):
+                continue
+            if any((c, level) in forced_horizontal for c in owners):
+                continue
+            # Port cut lines stay in every surface: port faces end on them, and
+            # merging around a port's ends would otherwise cancel its edges.
+            if edge in protected:
+                continue
+            a, b = owners
+            if (material(a, level - 1), material(a, level)) == (material(b, level - 1), material(b, level)):
+                group[root(a)] = root(b)
+        grouped = {}
+        for c in members:
+            grouped.setdefault(root(c), []).append(c)
+        for group_cells in grouped.values():
+            # Directed ring edges of interior seams cancel; the rest close into loops.
+            directed = set()
+            for c in group_cells:
+                for loop in rings[c]:
+                    for edge, forward in loop:
+                        step = edge if forward else (edge[1], edge[0])
+                        if (step[1], step[0]) in directed:
+                            directed.remove((step[1], step[0]))
+                        else:
+                            directed.add(step)
+            outgoing = {}
+            for u, v in directed:
+                outgoing.setdefault(u, []).append(v)
+            loops = []
+            while outgoing:
+                start = next(iter(outgoing))
+                loop, u = [], start
+                while True:
+                    v = outgoing[u].pop()
+                    if not outgoing[u]:
+                        del outgoing[u]
+                    loop.append((u, v))
+                    u = v
+                    if u == start:
+                        break
+                loops.append(loop)
+            shells = [loop for loop in loops if signed_area(loop) > 0]
+            holes = [loop for loop in loops if signed_area(loop) < 0]
+            shapes = [Polygon([xy[u] for u, _ in shell]) for shell in shells]
+            assigned = {i: [] for i in range(len(shells))}
+            for hole in holes:
+                probe = Point(xy[hole[0][0]])
+                inside = [i for i, shape in enumerate(shapes) if shape.buffer(1e-9).covers(probe)]
+                assigned[min(inside, key=lambda i: shapes[i].area)].append(hole)
+            first = group_cells[0]
+            forced = (first, level) in forced_horizontal
+            for index, shell in enumerate(shells):
+                curves = [[hline((u, v) if u < v else (v, u), level) * (1 if u < v else -1) for u, v in loop]
+                          for loop in [shell, *assigned[index]]]
+                tag = g.addPlaneSurface([g.addCurveLoop(loop) for loop in curves])
+                x0, y0, x1, y1 = shapes[index].bounds
+                faces.append({"tag": tag, "sides": (side(first, level - 1), side(first, level)),
+                              "materials": (material(first, level - 1), material(first, level)),
+                              "curves": [abs(t) for loop in curves for t in loop], "forced": forced,
+                              "kind": ("horizontal", first, level), "bbox": (x0, y0, levels[level], x1, y1, levels[level])})
+
+    for spec in slanted:
+        # A slanted lumped port inside one step: bottom and top run along port
+        # cut edges at the step's levels, joined by two sloping side lines.
+        k, bottom, top = spec["step"], spec["bottom"], spec["top"]
+        for chain in (bottom, top):
+            for a, b in zip(chain, chain[1:]):
+                if ((a, b) if a < b else (b, a)) not in edges:
+                    raise ValueError("Port segment is not a run of planar edges")
+        curves = [hline((a, b) if a < b else (b, a), k) * (1 if a < b else -1) for a, b in zip(bottom, bottom[1:])]
+        curves.append(g.addLine(point(bottom[-1], k), point(top[-1], k + 1)))
+        curves.extend(hline((a, b) if a < b else (b, a), k + 1) * (1 if a < b else -1)
+                      for a, b in zip(reversed(top), list(reversed(top))[1:]))
+        curves.append(g.addLine(point(top[0], k + 1), point(bottom[0], k)))
+        tag = g.addPlaneSurface([g.addCurveLoop(curves)])
+        comp = side(spec["cell"], k)
+        xs = [xy[n][0] for n in bottom + top]
+        ys = [xy[n][1] for n in bottom + top]
+        faces.append({"tag": tag, "sides": (comp, comp), "materials": (material(spec["cell"], k),) * 2,
+                      "curves": [abs(c) for c in curves], "forced": True, "kind": spec["kind"],
+                      "bbox": (min(xs), min(ys), levels[k], max(xs), max(ys), levels[k + 1])})
+
+    comps = {}
+    for face in faces:
+        a, b = face["sides"]
+        for comp in {a, b} - {None}:
+            comps.setdefault(comp, {"material": None, "bounding": [], "embedded": []})
+            (comps[comp]["embedded"] if a == b else comps[comp]["bounding"]).append(face)
+    for c in range(len(cells)):
+        for k in range(steps):
+            comp = find(c * steps + k)
+            if comp in comps:
+                comps[comp]["material"] = labels[c][k]
+    return faces, comps
+
+
+def add_component_volume(comp):
+    """Volume bounded by a component's faces, split into closed shells."""
+    by_curve = {}
+    for index, face in enumerate(comp["bounding"]):
+        for curve in face["curves"]:
+            by_curve.setdefault(curve, []).append(index)
+    seen, shells = set(), []
+    for start in range(len(comp["bounding"])):
+        if start in seen:
+            continue
+        shell, pending = [], [start]
+        seen.add(start)
+        while pending:
+            index = pending.pop()
+            shell.append(index)
+            for curve in comp["bounding"][index]["curves"]:
+                for other in by_curve[curve]:
+                    if other not in seen:
+                        seen.add(other)
+                        pending.append(other)
+        shells.append(shell)
+
+    def extent(shell):
+        boxes = [comp["bounding"][i]["bbox"] for i in shell]
+        lo = [min(b[j] for b in boxes) for j in range(3)]
+        hi = [max(b[j + 3] for b in boxes) for j in range(3)]
+        return (hi[0] - lo[0]) * (hi[1] - lo[1]) * (hi[2] - lo[2])
+
+    shells.sort(key=extent, reverse=True)
+    loops = [gmsh.model.geo.addSurfaceLoop([comp["bounding"][i]["tag"] for i in shell]) for shell in shells]
+    return gmsh.model.geo.addVolume(loops)
+
+
+def stage(label, started):
+    print(f"[{time.monotonic() - started:.1f}s] {label}", flush=True)
+
+
+def generate_multilayer_mesh(model, destination):
+    started = time.monotonic()
+    layered = model["multilayer"]
+    surface_impedance = model["copperModel"] == "surface_impedance_copper"
     board, planar_copper = layer_copper(model)
+    stage("planar copper built", started)
     validate_reference_connectivity(model, planar_copper)
+    stage("reference connectivity validated", started)
     gmsh.initialize()
     try:
-        gmsh.option.setNumber("Geometry.Tolerance", 1e-6)
-        gmsh.option.setNumber("Geometry.ToleranceBoolean", 1e-6)
+        # Shared points and curves are deduplicated on the 1 nm grid by the
+        # builder; Gmsh's own coherence pass would rescan every entity.
+        gmsh.option.setNumber("Geometry.AutoCoherence", 0)
+        gmsh.option.setNumber("Geometry.Tolerance", 1e-9)
         gmsh.model.add("multilayer-return-current")
         foil_layers = layered["stackup"]["copperLayers"]
         bottom, top = foil_layers[-1], foil_layers[0]
-        copper_by_net = {}
-        for foil in foil_layers:
-            for net_id, shape in planar_copper[foil["name"]].items():
-                copper_by_net.setdefault(net_id, []).extend(prism({"shape": shape, "zMin": foil["zMin"], "zMax": foil["zMax"]}))
         for barrel in layered["barrels"]:
             hole = Polygon(points(barrel["hole"]))
             outer = hole.buffer(barrel["platingThickness"], join_style="mitre")
             pads = Polygon(points(barrel["pads"]))
-            if not pads.buffer(2e-6).covers(outer) or not board.covers(pads):
+            if not pads.buffer(2e-6).covers(outer) or (not layered.get("region") and not board.covers(pads)):
                 raise ValueError("Plated barrel does not fit its pad/board")
-            copper_by_net.setdefault(barrel["netId"], []).extend(prism({"shape": outer.difference(hole), "zMin": barrel["zMin"], "zMax": barrel["zMax"]}))
-        copper = []
-        for net_id, volumes in copper_by_net.items():
-            if len(volumes) > 1:
-                volumes, _ = gmsh.model.occ.fuse(volumes[:1], volumes[1:])
-            copper.extend(volumes)
-        if not copper:
-            raise ValueError("Empty copper model")
-        # Dielectrics occupy the resin around patterned inner foil too. The
-        # fragments occupied by metal are removed from dielectric attributes.
-        dielectric_volumes = []
-        dielectric_counts = []
-        for slab in layered["stackup"]["dielectrics"]:
-            z_min = slab["zMin"]
-            lower = next((foil for foil in foil_layers if abs(foil["zMax"] - z_min) < 1e-8), None)
-            if lower and lower["name"] != "bottom":
-                z_min = lower["zMin"]
-            shape = board
-            # Blind/buried holes remove only their physical depth. Split slabs at
-            # drill endpoints so unused layers remain intact.
-            boundaries = sorted({z_min, slab["zMax"], *[z for drill in layered["drills"] for z in [drill["zMin"], drill["zMax"]]]})
-            volumes = []
-            for a, b in zip(boundaries, boundaries[1:]):
-                if a < z_min - 1e-9 or b > slab["zMax"] + 1e-9:
-                    continue
-                shape = board
-                for drill in layered["drills"]:
-                    if drill["zMin"] <= a and drill["zMax"] >= b:
-                        shape = shape.difference(Polygon(points(drill["hole"])))
-                volumes.extend(prism({"shape": shape, "zMin": a, "zMax": b}))
-            dielectric_volumes.extend(volumes)
-            dielectric_counts.append((slab["attribute"], len(volumes)))
-        min_x, min_y, max_x, max_y = board.bounds
-        padding = model["airPadding"]
-        air = (3, gmsh.model.occ.addBox(min_x - padding, min_y - padding, bottom["zMin"] - padding,
-                                      max_x - min_x + 2 * padding, max_y - min_y + 2 * padding,
-                                      top["zMax"] - bottom["zMin"] + 2 * padding))
         legacy = []
         for trace in model["geometry"]["signals"]:
             wires = [p for p in trace["route"] if p["route_type"] == "wire"]
@@ -302,7 +723,7 @@ def generate_multilayer_mesh(model, destination):
                 if not neighbor:
                     raise ValueError("Trace needs a nonzero segment for its terminal orientation")
                 legacy.append(neighbor)
-        port_surfaces = []
+        apertures = []
         for index, port in enumerate(model["ports"]):
             # Find signal owner by the endpoint's copper. Named PCB pin ownership
             # was already validated by the TS model builder.
@@ -311,40 +732,193 @@ def generate_multilayer_mesh(model, destination):
                       if shape.buffer(2e-6).covers(Point(endpoint["x"], endpoint["y"]))]
             if len(owners) != 1 or owners[0] == layered["referenceNetId"]:
                 raise ValueError("Signal terminal must contact exactly one non-reference conductor")
-            surface = port_surface({"model": model, "port": port, "neighbor": legacy[index],
-                                    "copper": planar_copper, "board": board, "signalNetId": owners[0]})
-            port_surfaces.append(surface)
-        tools = [*dielectric_volumes, *copper, *port_surfaces]
-        _, mapping = gmsh.model.occ.fragment([air], tools)
-        gmsh.model.occ.synchronize()
-        copper_offset = 1 + len(dielectric_volumes)
-        copper_tags = {tag for desc in mapping[copper_offset:copper_offset + len(copper)] for dim, tag in desc if dim == 3}
-        gmsh.model.addPhysicalGroup(3, sorted(copper_tags), 3, "copper")
+            apertures.append(port_surface({"model": model, "port": port, "neighbor": legacy[index],
+                                           "copper": planar_copper, "board": board, "signalNetId": owners[0]}))
+        # Copper, dielectric and air are one planar arrangement stacked over z,
+        # so the CAD model is assembled without any 3D Boolean. Overlapping
+        # solids made the old global fragment exhaust memory on dense DDR crops.
+        padding = model["airPadding"]
+        min_x, min_y, max_x, max_y = board.bounds
+        # The air box sits on the snap-rounding grid so its edges never move.
+        lo_x, lo_y = [math.floor((v - padding) / SLIVER_MM) * SLIVER_MM for v in (min_x, min_y)]
+        hi_x, hi_y = [math.ceil((v + padding) / SLIVER_MM) * SLIVER_MM for v in (max_x, max_y)]
+        box = Polygon([(lo_x, lo_y), (hi_x, lo_y), (hi_x, hi_y), (lo_x, hi_y)])
+        pieces = partition_pieces(model, board, planar_copper, box)
+        stage(f"partitioned {len(pieces)} pieces", started)
+        intervals = stack_intervals(layered)
+        levels = [bottom["zMin"] - padding, *[a for a, _ in intervals], intervals[-1][1], top["zMax"] + padding]
+
+        def level_index(z):
+            matches = [i for i, level in enumerate(levels) if abs(level - z) < 1e-8]
+            if len(matches) != 1:
+                raise ValueError(f"Port height {z} is not a stack level")
+            return matches[0]
+
+        def snap(v):
+            return round(v / SLIVER_MM) * SLIVER_MM
+
+        cuts = []
+        for aperture in apertures:
+            # Apertures sit on the snap-rounding grid so their edges survive it.
+            if aperture["kind"] == "coplanar":
+                aperture["patch"] = set_precision(aperture["patch"], grid_size=SLIVER_MM)
+                cuts.append(aperture["patch"].boundary)
+                continue
+            # The quad crosses each stack level in a segment. Every segment is
+            # its snapped centre plus/minus one snapped half-width, so segments
+            # stay exactly parallel and each per-step piece is exactly planar.
+            (sx, sy), (rx, ry) = aperture["signal"], aperture["reference"]
+            tx, ty = [snap(v) for v in aperture["halfWidth"]]
+            signal_z, reference_z = aperture["signalZ"], aperture["referenceZ"]
+            low, high = sorted([level_index(signal_z), level_index(reference_z)])
+            aperture["segments"] = {}
+            for level in range(low, high + 1):
+                f = (levels[level] - signal_z) / (reference_z - signal_z)
+                cx, cy = snap(sx + f * (rx - sx)), snap(sy + f * (ry - sy))
+                aperture["segments"][level] = ((cx - tx, cy - ty), (cx + tx, cy + ty))
+            reach = (max_x - min_x + max_y - min_y + 4 * padding) / (2 * (tx * tx + ty * ty) ** 0.5)
+            for (x0, y0), (x1, y1) in set(aperture["segments"].values()):
+                # Extend each footprint across the box so it splits cells cleanly.
+                cuts.extend([LineString([(x0 - (x1 - x0) * reach, y0 - (y1 - y0) * reach), (x0, y0)]),
+                             LineString([(x0, y0), (x1, y1)]),
+                             LineString([(x1, y1), (x1 + (x1 - x0) * reach, y1 + (y1 - y0) * reach)])])
+        cuts = [cut.intersection(box) for cut in cuts]
+        overlay_intervals, cells, stack_labels = overlay_cells(pieces, box, cuts)
+        if overlay_intervals != intervals:
+            raise ValueError("Partition intervals differ from the stack intervals")
+        labels = [(("air",), *label, ("air",)) for label in stack_labels]
+        stage(f"overlaid {len(cells)} planar cells over {len(levels) - 1} z steps", started)
+
+        def on_segment(px, py, segment):
+            # Snap-rounded crossings sit up to half a grid diagonal off the line.
+            return LineString(segment).distance(Point(px, py)) < SLIVER_MM
+
+        cell_tree = STRtree(cells)
+
+        def segment_nodes(segment):
+            """Overlay vertices on a port segment, ordered from its start."""
+            (x0, y0), (x1, y1) = segment
+            found = {}
+            for index in cell_tree.query(LineString(segment).buffer(SLIVER_MM)):
+                cell = cells[index]
+                for ring in [cell.exterior, *cell.interiors]:
+                    for x, y in ring.coords:
+                        if on_segment(x, y, segment):
+                            found[node_key(x, y)] = (x - x0) * (x1 - x0) + (y - y0) * (y1 - y0)
+            return sorted(found, key=found.get)
+
+        def segment_edges(segment):
+            nodes = segment_nodes(segment)
+            return [(a, b) if a < b else (b, a) for a, b in zip(nodes, nodes[1:])]
+
+        forced_lateral, forced_horizontal, port_kinds, slanted = set(), set(), [], []
+        for aperture in apertures:
+            kinds = set()
+            if aperture["kind"] == "coplanar":
+                level = level_index(aperture["z"])
+                for index, cell in enumerate(cells):
+                    # The aperture is the clear gap: grid-scale copper cells left
+                    # where the snapped patch meets rounded trace ends are excluded.
+                    touching = [labels[index][k] for k in (level - 1, level) if 0 <= k < len(labels[index])]
+                    if any(material[0] == "copper" for material in touching):
+                        continue
+                    if aperture["patch"].buffer(SLIVER_MM).covers(cell):
+                        kinds.add(("horizontal", index, level))
+            else:
+                segments = aperture["segments"]
+                ordered = sorted(segments)
+                for k, k_next in zip(ordered, ordered[1:]):
+                    if segments[k] == segments[k_next]:
+                        # Vertical in this step: the port is a run of side faces.
+                        for edge in segment_edges(segments[k]):
+                            kinds.add(("lateral", edge, k))
+                    else:
+                        (x0, y0), (x1, y1) = segments[k]
+                        (x2, y2), (x3, y3) = segments[k_next]
+                        center = Point((x0 + x1 + x2 + x3) / 4, (y0 + y1 + y2 + y3) / 4)
+                        slanted.append({"kind": ("slanted", len(port_kinds), k), "step": k,
+                                        "bottom": segment_nodes(segments[k]), "top": segment_nodes(segments[k_next]),
+                                        "cell": covering(cell_tree, cells, center, "Port aperture")})
+                        kinds.add(("slanted", len(port_kinds), k))
+            if not kinds:
+                raise ValueError("Lumped port aperture produced no surface")
+            forced_lateral.update((kind[1], kind[2]) for kind in kinds if kind[0] == "lateral")
+            forced_horizontal.update((kind[1], kind[2]) for kind in kinds if kind[0] == "horizontal")
+            port_kinds.append(kinds)
+        protected = set()
+        for cell in cells:
+            for ring in [cell.exterior, *cell.interiors]:
+                coords = list(ring.coords)
+                for (ax, ay), (bx, by) in zip(coords, coords[1:]):
+                    if any(cut.distance(Point(ax, ay)) < SLIVER_MM and cut.distance(Point(bx, by)) < SLIVER_MM
+                           for cut in cuts):
+                        a, b = node_key(ax, ay), node_key(bx, by)
+                        protected.add((a, b) if a < b else (b, a))
+        faces, comps = build_layered_brep(cells, labels, levels, forced_lateral, forced_horizontal, protected, slanted)
+        stage(f"built {len(faces)} faces and {len(comps)} material regions", started)
+        for face in faces:
+            if None in face["sides"] and face["kind"][0] == "lateral":
+                x0, y0, _, x1, y1, _ = face["bbox"]
+                bx0, by0, bx1, by1 = box.bounds
+                if not (max(abs(x0 - bx0), abs(x1 - bx0)) < 1e-6 or max(abs(x0 - bx1), abs(x1 - bx1)) < 1e-6
+                        or max(abs(y0 - by0), abs(y1 - by0)) < 1e-6 or max(abs(y0 - by1), abs(y1 - by1)) < 1e-6):
+                    raise ValueError(f"Non-conforming planar edge inside the model near {face['bbox'][:2]}")
+        volume_material = {}
+        for comp in comps.values():
+            if surface_impedance and comp["material"][0] == "copper":
+                continue
+            volume_material[add_component_volume(comp)] = comp
+        gmsh.model.geo.synchronize()
+        for tag, comp in volume_material.items():
+            if comp["embedded"]:
+                gmsh.model.mesh.embed(2, [face["tag"] for face in comp["embedded"]], 3, tag)
+        stage(f"synchronized {len(volume_material)} volumes", started)
+        copper_tags = {tag for tag, comp in volume_material.items() if comp["material"][0] == "copper"}
+        if not any(comp["material"][0] == "copper" for comp in comps.values()):
+            raise ValueError("Empty copper model")
+        if not surface_impedance:
+            gmsh.model.addPhysicalGroup(3, sorted(copper_tags), 3, "copper")
         dielectric_tags = set()
-        offset = 1
-        for attribute, count in dielectric_counts:
-            tags = {tag for desc in mapping[offset:offset + count] for dim, tag in desc if dim == 3} - copper_tags
+        for slab in layered["stackup"]["dielectrics"]:
+            attribute = slab["attribute"]
+            tags = {tag for tag, comp in volume_material.items() if comp["material"] == ("dielectric", attribute)}
             if not tags:
                 raise ValueError("Empty dielectric slab")
-            if tags.intersection(dielectric_tags):
-                raise ValueError("Overlapping dielectric slabs")
             gmsh.model.addPhysicalGroup(3, sorted(tags), attribute, f"dielectric-{attribute}")
             dielectric_tags.update(tags)
-            offset += count
-        air_tags = {tag for dim, tag in mapping[0] if dim == 3} - dielectric_tags - copper_tags
+        air_tags = {tag for tag, comp in volume_material.items() if comp["material"] == ("air",)}
         gmsh.model.addPhysicalGroup(3, sorted(air_tags), 1, "air")
+        by_kind = {face["kind"]: face for face in faces}
         port_tags = []
-        for index, desc in enumerate(mapping[copper_offset + len(copper):]):
-            tags = [tag for dim, tag in desc if dim == 2]
-            if not tags or set(tags).intersection(port_tags):
+        for index, kinds in enumerate(port_kinds):
+            tags = [by_kind[kind]["tag"] for kind in kinds]
+            if set(tags).intersection(port_tags):
                 raise ValueError("Lumped ports overlap or have no surface")
             gmsh.model.addPhysicalGroup(2, tags, 21 + index, f"port-{index + 1}")
             port_tags.extend(tags)
-        outer = [tag for dim, tag in gmsh.model.getBoundary([(3, tag) for tag in sorted(air_tags | dielectric_tags | copper_tags)], combined=True, oriented=False) if dim == 2]
+        outer = [face["tag"] for face in faces if None in face["sides"]]
         gmsh.model.addPhysicalGroup(2, outer, 13, "outer-air")
-        # Avoid tagging exposed drilled/board surfaces as absorbing boundaries.
-        # The combined boundary is the air enclosure, since voids are filled by air.
-        copper_surfaces = [tag for dim, tag in gmsh.model.getBoundary([(3, tag) for tag in copper_tags], combined=False, oriented=False) if dim == 2]
+
+        def is_copper(material):
+            return material is not None and material[0] == "copper"
+
+        copper_faces = [face for face in faces if any(is_copper(m) for m in face["materials"])]
+        copper_surfaces = [face["tag"] for face in copper_faces]
+        copper_volume = sum(cells[c].area * (levels[k + 1] - levels[k])
+                            for c in range(len(cells)) for k in range(len(levels) - 1) if is_copper(labels[c][k]))
+        if surface_impedance:
+            # Conductor interfaces face air or dielectric; copper interiors are not solved.
+            exposed = [face for face in copper_faces if sum(is_copper(m) for m in face["materials"]) == 1]
+            reference = ("copper", layered["referenceNetId"])
+            ground_faces = {face["tag"] for face in exposed if reference in face["materials"]}
+            signal_faces = {face["tag"] for face in exposed} - ground_faces
+            if not ground_faces or not signal_faces:
+                raise ValueError("Surface impedance requires exposed reference and signal conductor interfaces")
+            if (ground_faces | signal_faces).intersection(port_tags):
+                raise ValueError("Lumped port aperture overlaps a conductor impedance face")
+            gmsh.model.addPhysicalGroup(2, sorted(ground_faces), 11, "reference-copper")
+            gmsh.model.addPhysicalGroup(2, sorted(signal_faces), 12, "other-copper")
+            copper_surfaces = sorted(ground_faces | signal_faces)
         edges = sorted({tag for dim, tag in gmsh.model.getBoundary([(2, tag) for tag in [*copper_surfaces, *port_tags]], combined=False, oriented=False) if dim == 1})
         distance = gmsh.model.mesh.field.add("Distance")
         gmsh.model.mesh.field.setNumbers(distance, "CurvesList", edges)
@@ -357,19 +931,24 @@ def generate_multilayer_mesh(model, destination):
                             "Mesh.MeshSizeFromCurvature": 0, "Mesh.Algorithm3D": 1,
                             "General.NumThreads": 4, "Mesh.MshFileVersion": 2.2}.items():
             gmsh.option.setNumber(key, number)
+        stage("physical groups assigned", started)
         gmsh.model.mesh.generate(3)
+        stage("mesh generated", started)
         gmsh.write(str(destination / "mesh.msh"))
         tetrahedra = [int(tag) for tags in gmsh.model.mesh.getElements(3)[1] for tag in tags]
         qualities = gmsh.model.mesh.getElementQualities(tetrahedra, "minSICN")
         minimum_quality = float(min(qualities))
         if not minimum_quality > 1e-8:
             raise ValueError(f"Degenerate/inverted tetrahedra: min SICN={minimum_quality}")
-        summary = {"minimumSicn": minimum_quality, "geometryPrecisionMm": 1e-6, "nodes": len(gmsh.model.mesh.getNodes()[0]),
+        summary = {"minimumSicn": minimum_quality, "geometryPrecisionMm": SLIVER_MM, "nodes": len(gmsh.model.mesh.getNodes()[0]),
                    "tetrahedra": sum(len(tags) for tags in gmsh.model.mesh.getElements(3)[1]),
-                   "copperVolumeMm3": sum(gmsh.model.occ.getMass(3, tag) for tag in copper_tags),
-                   "dielectricAttributes": [a for a, _ in dielectric_counts],
-                   "portAttributes": list(range(21, 21 + len(port_surfaces))),
+                   "copperVolumeMm3": copper_volume,
+                   "dielectricAttributes": [slab["attribute"] for slab in layered["stackup"]["dielectrics"]],
+                   "portAttributes": list(range(21, 21 + len(apertures))),
                    "sampleLayer": layered["sampleLayer"]}
+        if surface_impedance:
+            summary.update({"copperModel": model["copperModel"], "conductivityBoundaryAttributes": [11, 12],
+                            "surfaceImpedance": model["surfaceImpedance"]})
         (destination / "mesh-summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     finally:
         gmsh.finalize()
