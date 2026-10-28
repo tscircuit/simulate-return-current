@@ -441,14 +441,24 @@ def create_configuration(model, port_count):
                     }
                 ]
             },
+            # A direct SuperLU factorization of a ~1M-unknown multilayer crop needs far more
+            # than a 12 GiB container; AMS-preconditioned GMRES matches MUMPS to ~6 digits.
             "Linear": {
+                "Type": "AMS",
+                "KSPType": "GMRES",
+                "Tol": 1e-8,
+                "MaxIts": 1000,
+                "ComplexCoarseSolve": False,
+                "PCMatShifted": False,
+                "EstimatorMG": True,
+            } if model.get("multilayer") else {
                 "Type": "SuperLU",
                 "KSPType": "GMRES",
                 "Tol": 1e-9,
                 "MaxIts": 200,
                 "ComplexCoarseSolve": True,
                 "PCMatShifted": False,
-                "EstimatorMG": bool(model.get("multilayer")),
+                "EstimatorMG": False,
             },
         },
     }
