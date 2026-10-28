@@ -567,11 +567,17 @@ export function createMultilayerPalaceModel(
     throw new Error(
       "The half-space surface-impedance model requires every foil and via-wall thickness >= 3 skin depths; use volumetric copper at lower frequencies",
     )
-  geometry.physicalModelSignature = JSON.stringify({
-    ...layered,
-    traceEndCaps: "round_32",
-    audit: undefined,
-  })
+  // Round like the rest of the geometry signature: libm differs between macOS
+  // and Linux in the last bit of some polygon vertices.
+  geometry.physicalModelSignature = JSON.stringify(
+    {
+      ...layered,
+      traceEndCaps: "round_32",
+      audit: undefined,
+    },
+    (_, value) =>
+      typeof value === "number" ? Number(value.toFixed(9)) : value,
+  )
   const order = options.order ?? 2
   if (order !== 1 && order !== 2) throw new Error("order must be 1 or 2")
   return {

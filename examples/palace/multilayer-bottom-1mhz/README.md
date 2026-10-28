@@ -8,10 +8,10 @@ inner2 and bottom. The source/load ports use actual top ground pins and
 This is a completed Palace v0.14.0 driven Maxwell solve with volumetric copper,
 three dielectric slabs (relative permittivity 4.1/4.42/4.1), FEM order 1,
 2 mm mesh target and 2 mm air padding. All emitted copper is retained.
-`mesh-summary.json` records 9,797 nodes and 54,053 tetrahedra.
+`mesh-summary.json` records 9,800 nodes and 54,262 tetrahedra.
 
 The full run at **0.05 mm** sample pitch (160 × 120 candidates) took
-**27.46 seconds** on the development machine, including meshing,
+**19.38 seconds** on the development machine, including meshing,
 two-process Palace, sampling and default image export. `run-timing.json`
 records that original run. This directory stores a subsequent **0.2 mm**
 resampling (40 × 30 candidates, 1196 copper samples) for compact,
