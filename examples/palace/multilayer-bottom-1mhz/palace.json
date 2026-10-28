@@ -103,12 +103,13 @@
       ]
     },
     "Linear": {
-      "Type": "SuperLU",
+      "Type": "AMS",
       "KSPType": "GMRES",
-      "Tol": 1e-09,
-      "MaxIts": 200,
-      "ComplexCoarseSolve": true,
-      "PCMatShifted": false
+      "Tol": 1e-10,
+      "MaxIts": 1000,
+      "ComplexCoarseSolve": false,
+      "PCMatShifted": false,
+      "EstimatorMG": true
     }
   }
 }

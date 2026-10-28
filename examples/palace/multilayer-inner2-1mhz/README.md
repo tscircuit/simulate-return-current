@@ -8,10 +8,10 @@ inner2 and bottom. The source/load ports use actual top ground pins and
 This is a completed Palace v0.14.0 driven Maxwell solve with volumetric copper,
 three dielectric slabs (relative permittivity 4.1/4.42/4.1), FEM order 1,
 2 mm mesh target and 2 mm air padding. All emitted copper is retained.
-`mesh-summary.json` records 9,686 nodes and 53,264 tetrahedra.
+`mesh-summary.json` records 9,735 nodes and 53,841 tetrahedra.
 
 The full run at **0.05 mm** sample pitch (160 × 120 candidates) took
-**37.45 seconds** on the development machine, including meshing,
+**48.00 seconds** on the development machine, including meshing,
 two-process Palace, sampling and default image export. `run-timing.json`
 records that original run. This directory stores a subsequent **0.2 mm**
 resampling (40 × 30 candidates, 1196 copper samples) for compact,
@@ -31,7 +31,12 @@ hashes. `palace.log`, `palace.json`, `port-I.csv` and `normalization.json`
 preserve solver configuration and source-normalization evidence.
 
 **Not mesh-convergence certified.** Source current is normalized at the
-port; that does not prove sampled plane current-density accuracy. These
+port; that does not prove sampled plane current-density accuracy. Regenerating this
+example with identical inputs gives a different mesh (Gmsh meshes surfaces on four
+threads), and for the inner2 example the sampled sheet current then differed by roughly
+45% relative L2 while port currents agreed to about 1e-4. The multilayer solve uses
+AMS-preconditioned GMRES at 1e-10, which matches a SuperLU solve on the same mesh
+to about 0.1%. These
 completed solves are geometry/sampling regression examples, not calibrated
 current-density limits or a certified multilayer ground truth. Quantitative
 use requires mesh/order refinement and relevant component/package models.

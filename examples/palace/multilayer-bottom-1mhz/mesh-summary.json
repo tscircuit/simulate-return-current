@@ -1,9 +1,9 @@
 {
-  "minimumSicn": 0.013166700232573781,
-  "geometryPrecisionMm": 1e-06,
-  "nodes": 9733,
-  "tetrahedra": 53537,
-  "copperVolumeMm3": 2.5342989840257313,
+  "minimumSicn": 0.000767865786855492,
+  "geometryPrecisionMm": 0.0005,
+  "nodes": 9797,
+  "tetrahedra": 54053,
+  "copperVolumeMm3": 2.5342247700000007,
   "dielectricAttributes": [
     105,
     103,

@@ -442,11 +442,12 @@ def create_configuration(model, port_count):
                 ]
             },
             # A direct SuperLU factorization of a ~1M-unknown multilayer crop needs far more
-            # than a 12 GiB container; AMS-preconditioned GMRES matches MUMPS to ~6 digits.
+            # than a 12 GiB container. AMS-preconditioned GMRES at 1e-10 matches SuperLU
+            # sampled currents to ~0.1% (1e-8 left ~2% field error at 1 MHz).
             "Linear": {
                 "Type": "AMS",
                 "KSPType": "GMRES",
-                "Tol": 1e-8,
+                "Tol": 1e-10,
                 "MaxIts": 1000,
                 "ComplexCoarseSolve": False,
                 "PCMatShifted": False,

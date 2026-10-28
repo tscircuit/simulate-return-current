@@ -1,5 +1,6 @@
 {
   "frequencyHz": 1000000,
+  "copperModel": "volumetric_copper",
   "ports": [
     {
       "source": "U1.OUT",
