@@ -9,9 +9,9 @@ import savedBoard from "../../examples/palace/multilayer-inner2-1mhz/circuit.jso
 
 const python = process.env.PALACE_MESH_PYTHON
 test.skipIf(!python)(
-  "fast Boolean cleanup preserves all material volumes, conductor interfaces and port apertures",
+  "layered geometry meshes every dielectric, port aperture and conductor interface from the planar partition",
   async () => {
-    const directory = await mkdtemp(join(tmpdir(), "boolean-cleanup-"))
+    const directory = await mkdtemp(join(tmpdir(), "layered-geometry-"))
     try {
       for (const variant of ["surface", "cropped", "volume"] as const) {
         const model = createPalaceModel({
@@ -30,7 +30,7 @@ test.skipIf(!python)(
         const filename = join(directory, "model.json")
         await writeFile(filename, JSON.stringify(model))
         const child = Bun.spawn(
-          [python!, resolve("tests/palace/boolean-cleanup.py"), filename],
+          [python!, resolve("tests/palace/layered-geometry.py"), filename],
           {
             env: { ...process.env, PYTHONPATH: resolve("lib/palace/python") },
             stdout: "pipe",
@@ -45,7 +45,8 @@ test.skipIf(!python)(
         if (code !== 0)
           throw new Error(`${variant}: ${stdout.slice(-2000)}\n${stderr}`)
         const report = JSON.parse(stdout.trim().split("\n").at(-1)!)
-        expect(report.unchangedPhysicalGroups).toBeGreaterThanOrEqual(8)
+        expect(report.minimumSicn).toBeGreaterThan(1e-6)
+        expect(report.dielectricAttributes).toEqual([101, 103, 105])
       }
     } finally {
       await rm(directory, { recursive: true, force: true })
