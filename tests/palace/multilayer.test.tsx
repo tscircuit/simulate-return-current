@@ -53,7 +53,7 @@ test("four-layer TSX retains inner routing, blind signal barrels, ground through
       .map((p) => p.layer),
   ).toContain("inner1")
   expect(model.ports!.map((p) => p.resistance)).toEqual([25, 100])
-  expect(model.geometry.cutouts).toHaveLength(2) // Ground drills; blind signal drills stop above inner2.
+  expect(model.geometry.cutouts).toHaveLength(4) // Ground drills and their plated walls; blind signal drills stop above inner2.
   expect(() => simulateReturnCurrent({ circuitJson })).toThrow("require Palace")
 })
 

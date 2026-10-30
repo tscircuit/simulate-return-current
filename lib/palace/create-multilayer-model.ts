@@ -195,6 +195,10 @@ export function createMultilayerPalaceModel(
     CopperKey,
     PalaceLayeredGeometry["copper"][number]
   >()
+  const platedWalls = new Map<
+    PalaceLayeredGeometry["barrels"][number],
+    Point[]
+  >()
   for (const layer of stackup.copperLayers)
     for (const netId of [referenceNetId]) {
       const copper = { layer: layer.name, netId, regions: [], segments: [] }
@@ -343,7 +347,7 @@ export function createMultilayerPalaceModel(
           })
         : platedPadOutline(element)
     // Mesher offsets this hole by plating thickness, including slotted holes.
-    layered.barrels.push({
+    const barrel = {
       netId,
       hole,
       outer: hole,
@@ -352,7 +356,32 @@ export function createMultilayerPalaceModel(
       zMin,
       zMax,
       platingThickness: 0.025,
-    })
+    }
+    layered.barrels.push(barrel)
+    // The sample mask needs the plated wall's outer outline; 1 um extra covers
+    // the mesher's mitred offset of the polygonal hole.
+    const wall = 2 * (barrel.platingThickness + 0.001)
+    platedWalls.set(
+      barrel,
+      element.type === "pcb_via"
+        ? roundedOutline({
+            ...element,
+            width: element.hole_diameter + wall,
+            height: element.hole_diameter + wall,
+          })
+        : drillOutline(
+            "hole_diameter" in element
+              ? {
+                  ...element,
+                  hole_diameter: (element.hole_diameter ?? 0) + wall,
+                }
+              : {
+                  ...element,
+                  hole_width: (element.hole_width ?? 0) + wall,
+                  hole_height: (element.hole_height ?? 0) + wall,
+                },
+          ),
+    )
     layered.drills.push({ hole, zMin, zMax })
     if (element.type === "pcb_via") layered.audit.vias++
     else layered.audit.platedHoles++
@@ -432,6 +461,15 @@ export function createMultilayerPalaceModel(
   for (const drill of layered.drills)
     if (drill.zMin <= sampleFoil.zMin && drill.zMax >= sampleFoil.zMax)
       geometry.cutouts.push(drill.hole)
+  // A reference barrel continuing past both faces of the sample foil joins it
+  // through its plated wall, so no foil face exists there to sample.
+  for (const barrel of layered.barrels)
+    if (
+      barrel.netId === referenceNetId &&
+      barrel.zMin < sampleFoil.zMin - 1e-9 &&
+      barrel.zMax > sampleFoil.zMax + 1e-9
+    )
+      geometry.cutouts.push(platedWalls.get(barrel)!)
   const ports: PalaceTerminalPort[] = []
   for (const excitation of excitations) {
     if (!Number.isFinite(excitation.current))
@@ -529,11 +567,17 @@ export function createMultilayerPalaceModel(
     throw new Error(
       "The half-space surface-impedance model requires every foil and via-wall thickness >= 3 skin depths; use volumetric copper at lower frequencies",
     )
-  geometry.physicalModelSignature = JSON.stringify({
-    ...layered,
-    traceEndCaps: "round_32",
-    audit: undefined,
-  })
+  // Round like the rest of the geometry signature: libm differs between macOS
+  // and Linux in the last bit of some polygon vertices.
+  geometry.physicalModelSignature = JSON.stringify(
+    {
+      ...layered,
+      traceEndCaps: "round_32",
+      audit: undefined,
+    },
+    (_, value) =>
+      typeof value === "number" ? Number(value.toFixed(9)) : value,
+  )
   const order = options.order ?? 2
   if (order !== 1 && order !== 2) throw new Error("order must be 1 or 2")
   return {
