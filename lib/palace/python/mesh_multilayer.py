@@ -927,12 +927,17 @@ def generate_multilayer_mesh(model, destination):
         for key, number in {"InField": distance, "SizeMin": min(model["meshSize"] / 3, model["portWidth"] / 2), "SizeMax": model["meshSize"], "DistMin": 0.05, "DistMax": 0.8}.items():
             gmsh.model.mesh.field.setNumber(threshold, key, number)
         gmsh.model.mesh.field.setAsBackgroundMesh(threshold)
+        # One thread: parallel surface meshing made the mesh differ run to run, and
+        # some draws left near-zero-volume tets (min SICN 1.6e-12 on DDR_CSn0).
         for key, number in {"Mesh.MeshSizeExtendFromBoundary": 0, "Mesh.MeshSizeFromPoints": 0,
                             "Mesh.MeshSizeFromCurvature": 0, "Mesh.Algorithm3D": 1,
-                            "General.NumThreads": 4, "Mesh.MshFileVersion": 2.2}.items():
+                            "General.NumThreads": 1, "Mesh.MshFileVersion": 2.2}.items():
             gmsh.option.setNumber(key, number)
         stage("physical groups assigned", started)
         gmsh.model.mesh.generate(3)
+        # The default optimizer leaves some ill-shaped tets; relocating vertices
+        # keeps the element set and lifts the worst quality.
+        gmsh.model.mesh.optimize("Relocate3D")
         stage("mesh generated", started)
         gmsh.write(str(destination / "mesh.msh"))
         tetrahedra = [int(tag) for tags in gmsh.model.mesh.getElements(3)[1] for tag in tags]
