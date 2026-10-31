@@ -13,9 +13,13 @@ export function parseResistanceOhms(value: number | string): number {
   return parseQuantity(
     value,
     {
+      mohm: 1e-3,
+      mOhm: 1e-3,
+      mΩ: 1e-3,
       ohm: 1,
       ohms: 1,
       Ohm: 1,
+      Ohms: 1,
       Ω: 1,
       kohm: 1e3,
       kOhm: 1e3,
