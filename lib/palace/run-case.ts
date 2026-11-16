@@ -75,6 +75,12 @@ export async function runPalaceCase(options: PalaceCaseOptions): Promise<void> {
         `type=bind,src=${destination},dst=/case`,
         "--workdir",
         "/case",
+        // With OpenBLAS's auto-detected kernels on Intel Xeon 6975P-C runners,
+        // SuperLU finds an exactly zero pivot on input that solves on AMD EPYC.
+        // Pinning OpenBLAS to its Haswell kernels makes the solve succeed on
+        // both CPUs.
+        "--env",
+        "OPENBLAS_CORETYPE=Haswell",
         palaceImage,
         "palace",
         "-np",
