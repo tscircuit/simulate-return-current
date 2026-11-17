@@ -365,7 +365,7 @@ def generate_mesh(model, destination):
         gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
         gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
         gmsh.option.setNumber("Mesh.Algorithm3D", 1)
-        gmsh.option.setNumber("General.NumThreads", 4)
+        gmsh.option.setNumber("General.NumThreads", 1)
         gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
         gmsh.model.mesh.generate(3)
         gmsh.write(str(destination / "mesh.msh"))

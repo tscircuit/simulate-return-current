@@ -355,7 +355,7 @@ def generate_multilayer_mesh(model, destination):
         gmsh.model.mesh.field.setAsBackgroundMesh(threshold)
         for key, number in {"Mesh.MeshSizeExtendFromBoundary": 0, "Mesh.MeshSizeFromPoints": 0,
                             "Mesh.MeshSizeFromCurvature": 0, "Mesh.Algorithm3D": 1,
-                            "General.NumThreads": 4, "Mesh.MshFileVersion": 2.2}.items():
+                            "General.NumThreads": 1, "Mesh.MshFileVersion": 2.2}.items():
             gmsh.option.setNumber(key, number)
         gmsh.model.mesh.generate(3)
         gmsh.write(str(destination / "mesh.msh"))

@@ -64,6 +64,9 @@
     "typescript": "5.9.3",
     "vite": "7.3.6"
   },
+  "overrides": {
+    "@tscircuit/capacity-autorouter": "0.0.964"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
