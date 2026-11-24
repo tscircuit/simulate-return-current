@@ -152,6 +152,7 @@ export function segmentInCopper(
     ...geometry.groundRegions.flatMap((region) => [
       region.outer,
       ...region.holes,
+      ...(region.maskCutouts ?? []),
     ]),
   ]
   const dx = segment.end.x - segment.start.x
